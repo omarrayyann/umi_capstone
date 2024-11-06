@@ -135,6 +135,9 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
     print("Model Name:", cfg.policy.obs_encoder.model_name)
     print("Dataset Path:", cfg.task.dataset.dataset_path)
 
+
+    
+
     # Setup experiment
     dt = 1 / frequency
 
@@ -401,7 +404,7 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                 gripper_width =  (gripper_width_raw-0.04272118273535439)/0.085888858 * 600
                 print("Gripper Width", gripper_width)
                 # print("Delta Pose", target_pose[:,0:6][:])
-            last_gripper_width = gripper_width[-1]
+            last_gripper_width = gripper_width_raw[0]
             # Execute actions
 
             # env.exec_actions(
