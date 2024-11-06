@@ -78,47 +78,6 @@ def find_elgato_device(devices):
     return elgato_devices
 
 
-def get_image_transform(in_res, out_res, crop_ratio=1):
-    """
-    Configures image transformation parameters.
-
-    Args:
-        in_res (tuple): Input resolution (width, height).
-        out_res (tuple): Output resolution (width, height).
-        crop_ratio (float): Ratio for cropping the image.
-
-    Returns:
-        function: A function that applies the transformation to an input frame.
-    """
-    def transform(image):
-        if image is None or image.size == 0:
-            print("Warning: Empty frame received.")
-            return None
-
-        h, w = image.shape[:2]  # get actual dimensions from the frame
-        crop_h = int(h * crop_ratio)
-        crop_w = int(w * crop_ratio)
-
-        # Ensure cropping region is within bounds
-        center_x, center_y = w // 2, h // 2
-        start_x = max(center_x - crop_w // 2, 0)
-        end_x = min(center_x + crop_w // 2, w)
-        start_y = max(center_y - crop_h // 2, 0)
-        end_y = min(center_y + crop_h // 2, h)
-
-        # Perform cropping and resizing
-        cropped_img = image[start_y:end_y, start_x:end_x]
-
-        # Check if the cropped image is empty before resizing
-        if cropped_img.size == 0:
-            print("Warning: Cropped image is empty.")
-            return None
-
-        return cv2.resize(cropped_img, out_res)
-
-    return transform
-
-
 @click.command()
 @click.option('--input', '-i', required=True, help='Path to checkpoint')
 @click.option('--output', '-o', required=True, help='Directory to save recording')
@@ -248,9 +207,9 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
     # Define image transformation parameters
     # Adjust capture_res based on your camera's native resolution
     # For example, if Elgato captures at 1920x1080, set accordingly
-    capture_res = (2704, 2028)  # Example input resolution (width, height)
+    capture_res = (640,480)  # Example input resolution (width, height)
     out_res = (224, 224)         # Desired output resolution
-    img_tf = get_image_transform(in_res=capture_res, out_res=out_res)
+    img_tf = get_image_transform(input_res=capture_res, output_res=out_res)
 
 
     # Load model
@@ -347,6 +306,7 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
 
             # Capture frame from camera
             ret, frame = cap.read()
+            print(frame.shape)
             if not ret:
                 print("Failed to read frame from GoPro stream.")
                 break
@@ -391,19 +351,18 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                 mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle_wrt_start'] = np.zeros((2, 6)).astype(np.float32)  # [rot_6d representation]
                 mock_robot_obs[f'robot{robot_id}_gripper_width'] = last_gripper_width*np.ones((2,1)).astype(np.float32)  # [gripper width]
 
-            # mock_camera_frame = np.random.rand(2, 224, 224, 3).astype(np.float32)  # Mock image
-            # mock_camera_frame = (mock_camera_frame * 255).astype(np.uint8)  # Convert to uint8
-
             # # Populate env_obs
             # env_obs = {
-            #     'camera0_rgb': mock_camera_frame,  # Shape: (224, 224, 3)
+            #     'camera0_rgb': obs_image,  # Shape: (224, 224, 3)
             # }
-            env_obs.update(mock_robot_obs)  # Add robot observations
+            mock_robot_obs['camera0_rgb'] = obs_image
+            cv2.imshow('GoPro Stream', obs_image[0])
+
         
             # Run inference
             with torch.no_grad():
                 obs_dict_np = get_real_umi_obs_dict(
-                    env_obs=env_obs, 
+                    env_obs=mock_robot_obs, 
                     shape_meta=cfg.task.shape_meta, 
                     obs_pose_repr=obs_pose_repr,
                     tx_robot1_robot0=tx_robot1_robot0,
@@ -438,10 +397,11 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                 action_env[7 * robot_idx: 7 * robot_idx + 6] = target_pose[robot_idx][:6]
                 action_env[7 * robot_idx + 6] = target_pose[robot_idx][6]
             
-                print("Gripper Width", target_pose[:,6][:])
-                last_gripper_width = target_pose[:,6][3]
+                gripper_width_raw = target_pose[:,6][:]
+                gripper_width =  (gripper_width_raw-0.04272118273535439)/0.085888858 * 600
+                print("Gripper Width", gripper_width)
                 # print("Delta Pose", target_pose[:,0:6][:])
-
+            last_gripper_width = gripper_width[-1]
             # Execute actions
 
             # env.exec_actions(
