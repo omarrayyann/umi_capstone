@@ -308,11 +308,11 @@ def main(input, output, robot_config,
                         vis_img = (vis_img + match_img) / 2
                     obs_left_img = obs['camera0_rgb'][-1]
                     obs_right_img = obs['camera0_rgb'][-1]
-                    vis_img = np.concatenate([obs_left_img, obs_right_img, vis_img], axis=1)
+                    vis_img = np.concatenate([obs_left_img, obs_right_img, ], axis=1)
                     
                     text = f'Episode: {episode_id}'
                     cv2.putText(
-                        vis_img,
+                        vis_img,vis_img
                         text,
                         (10,20),
                         fontFace=cv2.FONT_HERSHEY_SIMPLEX,

@@ -1,5 +1,5 @@
 # eval_real_umi_simple.py
-
+import pickle
 import os
 import time
 import pathlib
@@ -15,6 +15,8 @@ from omegaconf import OmegaConf
 from multiprocessing.managers import SharedMemoryManager
 import subprocess
 import collections
+from multiprocessing import shared_memory
+from scipy.spatial.transform import Rotation as R
 
 import hydra
 from diffusion_policy.common.replay_buffer import ReplayBuffer
@@ -78,6 +80,20 @@ def find_elgato_device(devices):
     return elgato_devices
 
 
+def load_normalizer(normalizer_path):
+    """
+    Load the LinearNormalizer from the given .pkl file using pickle.
+    """
+    try:
+        with open(normalizer_path, 'rb') as f:
+            normalizer = pickle.load(f)
+        print("Loaded normalizer successfully.")
+        return normalizer
+    except Exception as e:
+        print(f"Error loading normalizer: {e}")
+        return None
+
+
 @click.command()
 @click.option('--input', '-i', required=True, help='Path to checkpoint')
 @click.option('--output', '-o', required=True, help='Directory to save recording')
@@ -88,11 +104,16 @@ def find_elgato_device(devices):
 @click.option('--frequency', '-f', default=10, type=float, help="Control frequency in Hz.")
 @click.option('--command_latency', '-cl', default=0.01, type=float, help="Latency in seconds.")
 @click.option('--verify_cameras', '-vc', is_flag=True, default=False, help='Verify and display connected cameras.')
-def main(input, output, robot_config, gopro_stream, steps_per_inference, max_duration, frequency, command_latency, verify_cameras):
+@click.option('--normalizer', '-n', required=True, help='Path to normalizer .pkl file')
+def main(input, output, normalizer, robot_config, gopro_stream, steps_per_inference, max_duration, frequency, command_latency, verify_cameras):
     import subprocess
     import collections
+
+    print(normalizer)
     
     frame_queue = collections.deque(maxlen=2)
+    pose_queue = collections.deque(maxlen=2)
+    gripper_queue = collections.deque(maxlen=2)
 
     # Load robot config file
     try:
@@ -111,6 +132,11 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
 
     if not robots_config:
         print("No robot configurations found in the config file.")
+        return
+    
+    normalizer = load_normalizer(normalizer)
+    if normalizer is None:
+        print("Failed to load normalizer. Exiting.")
         return
 
     # Load checkpoint
@@ -134,9 +160,6 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
 
     print("Model Name:", cfg.policy.obs_encoder.model_name)
     print("Dataset Path:", cfg.task.dataset.dataset_path)
-
-
-    
 
     # Setup experiment
     dt = 1 / frequency
@@ -238,16 +261,17 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
     obs_pose_repr = cfg.task.pose_repr.obs_pose_repr
     action_pose_repr = cfg.task.pose_repr.action_pose_repr
 
-
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     policy.eval().to(device)
 
     print("Warming up policy inference")
 
+    shm = shared_memory.SharedMemory(name='my_pose')
+
     # Initialize episode_start_pose based on initial observations
     # Since we don't have actual observations, we'll initialize with zeros
     episode_start_pose = [np.zeros(6, dtype=np.float32) for _ in robots_config]  # [x, y, z, roll, pitch, yaw]
+
 
     # Initialize mock robot observations
     # Assuming only one robot; extend if multiple robots are configured
@@ -297,13 +321,18 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
         #     return
 
     print('Ready!')
-    last_gripper_width = 0.1286
+
     try:
         # Start episode
         policy.reset()
         eval_t_start = time.time()
 
         iter_idx = 0
+
+        start_time = time.time()
+        start_pose  = np.ndarray((4, 4), dtype=np.float64, buffer=shm.buf)
+        start_pose[3,3] = 1.0
+
         while True:
             t_cycle_end = iter_idx * dt
 
@@ -313,6 +342,20 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
             if not ret:
                 print("Failed to read frame from GoPro stream.")
                 break
+            
+            end_time = time.time()
+            print(1/(end_time-start_time))
+            start_time = time.time()  
+
+            # Create a NumPy array backed by shared memory
+            pose = np.ndarray((4, 4), dtype=np.float64, buffer=shm.buf)
+            gripper_width = pose[3,3]/600*0.085888858 + 0.04272118273535439
+
+
+            pose[3,3] = 1
+
+            gripper_queue.append(gripper_width)
+            pose_queue.append(pose)
                 
             transformed_frame = img_tf(frame)
             if transformed_frame is None:
@@ -329,7 +372,7 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                 break
             
             # Ensure the queue has two frames
-            if len(frame_queue) < 2:
+            if len(frame_queue) < 2 or len(pose_queue) < 2:
                 print("Waiting for two frames to populate the queue.")
                 continue
 
@@ -346,13 +389,41 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
             # obs_image = np.transpose(obs_image, (2, 0, 1))  # Convert from HWC to CHW
             # obs_image = np.expand_dims(obs_image, axis=0)   # Add batch dimension
 
+
             # Mock robot observations (replace with actual data if available)
             mock_robot_obs = {}
             for robot_id in range(len(robots_config)):
-                mock_robot_obs[f'robot{robot_id}_eef_pos'] = np.zeros((2, 3)).astype(np.float32)  # [x, y, z]
-                mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle'] = np.zeros((2, 3)).astype(np.float32)  # [roll, pitch, yaw]
-                mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle_wrt_start'] = np.zeros((2, 6)).astype(np.float32)  # [rot_6d representation]
-                mock_robot_obs[f'robot{robot_id}_gripper_width'] = last_gripper_width*np.ones((2,1)).astype(np.float32)  # [gripper width]
+
+                # delta_pos1 = pose_queue[-2][:3,3] - pose_queue[-1][:3,3]
+                # delta_pos2 = pose_queue[-3][:3,3] - pose_queue[-2][:3,3]
+                last_two_delta_pos = np.array([pose_queue[-2][:3,3], pose_queue[-1][:3,3]])
+
+                print(last_two_delta_pos)
+
+                # rot_prev = R.from_matrix(pose_queue[-2][:3, :3])
+                # rot_prev_prev = R.from_matrix(pose_queue[-3][:3, :3])
+                # delta_rot2 = rot_prev.inv() * R.from_matrix(pose_queue[-1][:3, :3])
+                # delta_rot1 = rot_prev_prev.inv() * rot_prev
+                last_two_delta_rot = np.array([R.from_matrix(pose_queue[-2][:3, :3]).as_euler('xyz', degrees=False),
+                                            R.from_matrix(pose_queue[-1][:3, :3]).as_euler('xyz', degrees=False)])
+                
+
+                rot_start = R.from_matrix(start_pose[:3, :3])
+                delta_rot_wrt_start2 = rot_start.inv() * R.from_matrix(pose_queue[-1][:3, :3])
+                delta_rot_wrt_start1 = rot_start.inv() * R.from_matrix(pose_queue[-2][:3, :3])
+                last_two_delta_rot_wrt_start = np.array([
+                    delta_rot_wrt_start1.as_euler('xyz', degrees=False),
+                    delta_rot_wrt_start2.as_euler('xyz', degrees=False)
+                ])
+
+                last_two_grasping_width = np.array([gripper_queue[-2], gripper_queue[-1]]).reshape(2,1  )
+
+                mock_robot_obs[f'robot{robot_id}_eef_pos'] = last_two_delta_pos  # [x, y, z]
+                mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle'] = last_two_delta_rot  # [roll, pitch, yaw]
+                mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle_wrt_start'] = last_two_delta_rot_wrt_start  # [rot_6d representation]
+                mock_robot_obs[f'robot{robot_id}_gripper_width'] = last_two_grasping_width
+
+                print(mock_robot_obs[f'robot{robot_id}_eef_pos'])
 
             # # Populate env_obs
             # env_obs = {
@@ -368,14 +439,20 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                     env_obs=mock_robot_obs, 
                     shape_meta=cfg.task.shape_meta, 
                     obs_pose_repr=obs_pose_repr,
-                    tx_robot1_robot0=tx_robot1_robot0,
+                    tx_robot1_robot0=None,
                     episode_start_pose=episode_start_pose
                 )
-            
+
+                print(obs_dict_np)
+                
                 obs_dict = dict_apply(obs_dict_np, 
                     lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+                
+                # obs_dict = normalizer.normalize(obs_dict)
+
                 result = policy.predict_action(obs_dict)
                 raw_action = result['action_pred'][0].detach().cpu().numpy()
+                # print("raw action: ", raw_action)
                 action = get_real_umi_action(raw_action, env_obs, action_pose_repr)
                 del result
 
@@ -392,7 +469,7 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
             #     robots_config=robots_config
             # )
 
-            print(target_pose.shape)
+            # print(target_pose.shape)
 
             # Prepare actions for environment
             action_env = np.zeros((7 * len(robots_config),))
@@ -403,8 +480,8 @@ def main(input, output, robot_config, gopro_stream, steps_per_inference, max_dur
                 gripper_width_raw = target_pose[:,6][:]
                 gripper_width =  (gripper_width_raw-0.04272118273535439)/0.085888858 * 600
                 print("Gripper Width", gripper_width)
-                # print("Delta Pose", target_pose[:,0:6][:])
-            last_gripper_width = gripper_width_raw[0]
+                print("Delta Pose", target_pose[:,0:3][:])
+
             # Execute actions
 
             # env.exec_actions(
