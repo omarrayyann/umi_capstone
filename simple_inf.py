@@ -31,6 +31,60 @@ from umi.real_world.real_inference_util import (
 )
 from umi.common.pose_util import pose_to_mat, mat_to_pose
 
+def write_desired_pose(desired_pose: np.ndarray, shm_name='desired_poses_shm', flag_name='pose_flag_shm'):
+    """
+    Writes an array of desired pose matrices to shared memory and sets the flag.
+    
+    Parameters:
+    - desired_pose: (6, 4, 4) numpy array representing six desired poses.
+    - shm_name: Name of the shared memory block for the poses.
+    - flag_name: Name of the shared memory block for the flag.
+    """
+    # Validate the desired_pose shape and dtype
+    if desired_pose.shape != (6, 4, 4):
+        raise ValueError("desired_pose must be a (6, 4, 4) array.")
+    if desired_pose.dtype != np.float64:
+        raise ValueError("desired_pose must be of type np.float64.")
+
+    # Connect to or create the shared memory blocks
+    try:
+        # Try to connect to existing shared memory blocks
+        shm = shared_memory.SharedMemory(name=shm_name)
+        shm_flag = shared_memory.SharedMemory(name=flag_name)
+        print("Connected to existing shared memory blocks.")
+    except FileNotFoundError:
+        # If not found, create them
+        print("Shared memory blocks not found. Creating new shared memory blocks.")
+        # Size for desired_poses_shm: 6 poses * 4x4 matrix of float64 => 6*4*4*8 bytes
+        shm = shared_memory.SharedMemory(name=shm_name, create=True, size=8 * 6 * 16)
+        # Size for pose_flag_shm: 1 byte
+        shm_flag = shared_memory.SharedMemory(name=flag_name, create=True, size=1)
+        # Initialize flag to 0
+        shm_flag.buf[0] = 0
+        print("Created shared memory blocks.")
+
+    # Create numpy arrays backed by shared memory
+    desired_poses_array = np.ndarray((6, 4, 4), dtype=np.float64, buffer=shm.buf)
+    flag_array = np.ndarray((1,), dtype=np.uint8, buffer=shm_flag.buf)
+
+    try:
+       desired_poses_array[:] = desired_pose
+       flag_array[0] = 1
+
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
+
+    finally:
+        # Clean up: close shared memory (do not unlink as ROS node is using it)
+        shm.close()
+        shm_flag.close()
+        print("Shared memory blocks closed.")
+
+        # Optionally, unlink shared memory blocks if no longer needed
+        # WARNING: Only do this if you are certain no other process is using them
+        # shm.unlink()
+        # shm_flag.unlink()
+
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 def list_v4l2_devices():
@@ -108,8 +162,6 @@ def load_normalizer(normalizer_path):
 def main(input, output, normalizer, robot_config, gopro_stream, steps_per_inference, max_duration, frequency, command_latency, verify_cameras):
     import subprocess
     import collections
-
-    print(normalizer)
     
     frame_queue = collections.deque(maxlen=2)
     pose_queue = collections.deque(maxlen=2)
@@ -271,7 +323,7 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
     # Initialize episode_start_pose based on initial observations
     # Since we don't have actual observations, we'll initialize with zeros
     episode_start_pose = [np.zeros(6, dtype=np.float32) for _ in robots_config]  # [x, y, z, roll, pitch, yaw]
-
+    
 
     # Initialize mock robot observations
     # Assuming only one robot; extend if multiple robots are configured
@@ -321,7 +373,14 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
         #     return
 
     print('Ready!')
+    start_time = time.time()
+    start_pose  = np.ndarray((4, 4), dtype=np.float64, buffer=shm.buf)
+    start_pose[3,3] = 1.0
 
+    starting_pose = start_pose.copy()
+
+    episode_start_pose = mat_to_pose(start_pose).reshape(1,6)
+    print("EO: ", episode_start_pose)
     try:
         # Start episode
         policy.reset()
@@ -338,7 +397,6 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
 
             # Capture frame from camera
             ret, frame = cap.read()
-            print(frame.shape)
             if not ret:
                 print("Failed to read frame from GoPro stream.")
                 break
@@ -398,8 +456,6 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
                 # delta_pos2 = pose_queue[-3][:3,3] - pose_queue[-2][:3,3]
                 last_two_delta_pos = np.array([pose_queue[-2][:3,3], pose_queue[-1][:3,3]])
 
-                print(last_two_delta_pos)
-
                 # rot_prev = R.from_matrix(pose_queue[-2][:3, :3])
                 # rot_prev_prev = R.from_matrix(pose_queue[-3][:3, :3])
                 # delta_rot2 = rot_prev.inv() * R.from_matrix(pose_queue[-1][:3, :3])
@@ -408,7 +464,7 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
                                             R.from_matrix(pose_queue[-1][:3, :3]).as_euler('xyz', degrees=False)])
                 
 
-                rot_start = R.from_matrix(start_pose[:3, :3])
+                rot_start = R.from_matrix(starting_pose[:3, :3])
                 delta_rot_wrt_start2 = rot_start.inv() * R.from_matrix(pose_queue[-1][:3, :3])
                 delta_rot_wrt_start1 = rot_start.inv() * R.from_matrix(pose_queue[-2][:3, :3])
                 last_two_delta_rot_wrt_start = np.array([
@@ -423,7 +479,7 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
                 mock_robot_obs[f'robot{robot_id}_eef_rot_axis_angle_wrt_start'] = last_two_delta_rot_wrt_start  # [rot_6d representation]
                 mock_robot_obs[f'robot{robot_id}_gripper_width'] = last_two_grasping_width
 
-                print(mock_robot_obs[f'robot{robot_id}_eef_pos'])
+                print(mock_robot_obs)
 
             # # Populate env_obs
             # env_obs = {
@@ -435,16 +491,18 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
         
             # Run inference
             with torch.no_grad():
+
+                
                 obs_dict_np = get_real_umi_obs_dict(
                     env_obs=mock_robot_obs, 
                     shape_meta=cfg.task.shape_meta, 
-                    obs_pose_repr=obs_pose_repr,
+                    obs_pose_repr="rel",
                     tx_robot1_robot0=None,
                     episode_start_pose=episode_start_pose
                 )
-
-                print(obs_dict_np)
                 
+                # print(obs_dict_np)
+
                 obs_dict = dict_apply(obs_dict_np, 
                     lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
                 
@@ -453,7 +511,7 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
                 result = policy.predict_action(obs_dict)
                 raw_action = result['action_pred'][0].detach().cpu().numpy()
                 # print("raw action: ", raw_action)
-                action = get_real_umi_action(raw_action, env_obs, action_pose_repr)
+                action = get_real_umi_action(raw_action, mock_robot_obs, "rel")
                 del result
 
             # Solve collisions
@@ -479,8 +537,24 @@ def main(input, output, normalizer, robot_config, gopro_stream, steps_per_infere
             
                 gripper_width_raw = target_pose[:,6][:]
                 gripper_width =  (gripper_width_raw-0.04272118273535439)/0.085888858 * 600
-                print("Gripper Width", gripper_width)
-                print("Delta Pose", target_pose[:,0:3][:])
+                # print("Gripper Width", gripper_width)
+                # print("Pose: \n", target_pose[:,0:3][:])
+                # print(target_pose[:,0:3].shape)
+                # print("a: ", target_pose[:,0:3])
+
+                send = np.zeros((6,4,4))
+                for i in range(6):
+                    pose = target_pose[:,0:6][i]
+                    send[i][0:4,0:4] = pose_to_mat(pose)
+                    
+                    
+
+                print("send: ", send)
+                # po = target_pose[:,0:3][0:7].copy().reshape(6,4,4)
+                write_desired_pose(send)
+
+                # po[0:3,3] = target_pose[:,0:3][0]
+                # write_desired_pose(po,)
 
             # Execute actions
 

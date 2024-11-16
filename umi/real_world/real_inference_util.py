@@ -118,7 +118,6 @@ def get_real_umi_obs_dict(
     
     # generate pose relative to other robot
     n_robots = len(robot_prefix_map)
-    print("n_robots: ", n_robots    )
     for robot_id in range(n_robots):
         # convert pose to mat
         assert f'robot{robot_id}' in robot_prefix_map
@@ -177,8 +176,6 @@ def get_real_umi_action(
         action_pose_repr: str='abs'
     ):
 
-    print("GOT ENV_OBS: \n", env_obs)
-
     n_robots = int(action.shape[-1] // 10)
     env_action = list()
     for robot_idx in range(n_robots):
@@ -187,8 +184,8 @@ def get_real_umi_action(
             env_obs[f'robot{robot_idx}_eef_pos'][-1],
             env_obs[f'robot{robot_idx}_eef_rot_axis_angle'][-1]
         ], axis=-1))
-        
-        print("GOT pose_mat: \n", pose_mat)
+
+        print("JOHM: ", env_obs[f'robot{robot_idx}_eef_pos'])
 
         start = robot_idx * 10
         action_pose10d = action[..., start:start+9]

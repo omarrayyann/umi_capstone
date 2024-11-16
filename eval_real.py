@@ -235,10 +235,7 @@ def main(input, output, robot_config,
             policy.num_inference_steps = 16 # DDIM inference iterations
             obs_pose_rep = cfg.task.pose_repr.obs_pose_repr
             action_pose_repr = cfg.task.pose_repr.action_pose_repr
-            print('obs_pose_rep', obs_pose_rep)
-            print('action_pose_repr', action_pose_repr)
-
-
+           
             device = torch.device('cuda')
             policy.eval().to(device)
 
