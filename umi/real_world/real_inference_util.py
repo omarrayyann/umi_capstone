@@ -8,7 +8,7 @@ from diffusion_policy.common.pose_repr_util import (
 )
 from umi.common.pose_util import (
     pose_to_mat, mat_to_pose, 
-    mat_to_pose10d, pose10d_to_mat)
+    mat_to_pose10d, pose10d_to_mat, rot6d_to_mat, mat_to_rot6d)
 from diffusion_policy.model.common.rotation_transformer import \
     RotationTransformer
 
@@ -156,15 +156,21 @@ def get_real_umi_obs_dict(
             ], axis=-1))
             
             # get start pose
+
             start_pose = episode_start_pose[robot_id]
             start_pose_mat = pose_to_mat(start_pose)
+
+            
             rel_obs_pose_mat = convert_pose_mat_rep(
                 pose_mat,
                 base_pose_mat=start_pose_mat,
                 pose_rep='relative',
                 backward=False)
             
+
+            
             rel_obs_pose = mat_to_pose10d(rel_obs_pose_mat)
+
             # obs_dict_np[f'robot{robot_id}_eef_pos_wrt_start'] = rel_obs_pose[:,:3]
             obs_dict_np[f'robot{robot_id}_eef_rot_axis_angle_wrt_start'] = rel_obs_pose[:,3:]
 
@@ -176,6 +182,29 @@ def get_real_umi_action(
         action_pose_repr: str='abs'
     ):
 
+    action_copy = action.copy()
+
+    action[:,0] = action_copy[:,2]
+    action[:,1] = -action_copy[:,0]
+    action[:,2] = -action_copy[:,1]
+
+    # action[:,0] = action_copy[:,2]
+    # action[:,1] = -action_copy[:,0]
+    # action[:,2] = -action_copy[:,1]
+    
+    # mat = rot6d_to_mat(action_copy[:,3:9])
+
+    # mat[:,0:3,0] = mat[:,0:3,2]
+    # mat[:,0:3,1] = -mat[:,0:3,0]
+    # mat[:,0:3,2] = -mat[:,0:3,1]
+
+    # action[:,3:9] = mat_to_rot6d(mat)
+
+    
+    # action[:, 3] = action_copy[:, 3]          # rx' = rz
+    # action[:, 4] = action_copy[:, 4]         # ry' = -rx
+    # action[:, 5] = action_copy[:, 5]         # rz' = -ry
+
     n_robots = int(action.shape[-1] // 10)
     env_action = list()
     for robot_idx in range(n_robots):
@@ -184,8 +213,6 @@ def get_real_umi_action(
             env_obs[f'robot{robot_idx}_eef_pos'][-1],
             env_obs[f'robot{robot_idx}_eef_rot_axis_angle'][-1]
         ], axis=-1))
-
-        print("JOHM: ", env_obs[f'robot{robot_idx}_eef_pos'])
 
         start = robot_idx * 10
         action_pose10d = action[..., start:start+9]
@@ -198,6 +225,7 @@ def get_real_umi_action(
             base_pose_mat=pose_mat,
             pose_rep=action_pose_repr,
             backward=True)
+        
 
         # convert action to pose
         action_pose = mat_to_pose(action_mat)
